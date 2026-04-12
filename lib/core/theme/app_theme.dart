@@ -163,15 +163,15 @@ abstract final class AppTheme {
         linearTrackColor: AppColors.surface,
       ),
       switchTheme: SwitchThemeData(
-        thumbColor: WidgetStateProperty.resolveWith((states) {
-          if (states.contains(WidgetState.selected)) {
+        thumbColor: MaterialStateProperty.resolveWith((states) {
+          if (states.contains(MaterialState.selected)) {
             return AppColors.secondary;
           }
           return AppColors.textTertiary;
         }),
-        trackColor: WidgetStateProperty.resolveWith((states) {
-          if (states.contains(WidgetState.selected)) {
-            return AppColors.secondary.withValues(alpha: 0.3);
+        trackColor: MaterialStateProperty.resolveWith((states) {
+          if (states.contains(MaterialState.selected)) {
+            return AppColors.secondary.withOpacity(0.3);
           }
           return AppColors.surface;
         }),
