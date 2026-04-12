@@ -10,6 +10,8 @@ Claude Code for VS Code 채팅창에서 호출됩니다.
   uv run run.py --patch "..."         # 수정 모드: 자유 텍스트로 기존 파일 수정
   uv run run.py --cost                # 누적 API 비용 리포트 출력
   uv run run.py --build-worker-map    # 브라운필드 프로젝트용 worker_map.json 1회성 생성
+  uv run run.py --qa                  # 빌드 후 QA 파이프라인 실행
+  uv run run.py --qa-only             # QA만 단독 실행
 """
 
 import argparse
@@ -17,12 +19,25 @@ import asyncio
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 from pathlib import Path
 from datetime import datetime, timedelta
 
 import anthropic
+
+try:
+    from playwright.async_api import async_playwright
+    HAS_PLAYWRIGHT = True
+except ImportError:
+    HAS_PLAYWRIGHT = False
+
+try:
+    from aiohttp import web as aiohttp_web
+    HAS_AIOHTTP = True
+except ImportError:
+    HAS_AIOHTTP = False
 
 # ── 설정 ────────────────────────────────────────────────────────────────────
 
@@ -58,6 +73,266 @@ PRICING = {
 }
 
 _usage_by_model: dict[str, dict] = {}
+
+# ── 에스컬레이션 / QA 설정 ───────────────────────────────────────────────────
+
+ESCALATION_LEVELS = [
+    {"id": "lv1", "model": "claude-haiku-4-5-20251001", "thinking": False, "label": "Haiku"},
+    {"id": "lv2", "model": "claude-sonnet-4-6",         "thinking": False, "label": "Sonnet"},
+    {"id": "lv3", "model": "claude-opus-4-6",           "thinking": False, "label": "Opus"},
+    {"id": "lv4", "model": "claude-opus-4-6",           "thinking": True,  "label": "Opus+Thinking"},
+]
+
+QA_WEB_PORT = 9999
+QA_MAX_ROUNDS = 3
+QA_ROUTE_TIMEOUT = 15000  # ms
+QA_FLUTTER_BUILD_TIMEOUT = 300  # seconds
+QA_FLUTTER_SERVE_TIMEOUT = 180  # seconds
+
+# ── Dashboard / 실시간 모니터링 설정 ─────────────────────────────────────────
+
+DASHBOARD_PORT = 8765
+STATUS_PATH = Path(__file__).parent / "status.json"
+DASHBOARD_HTML_PATH = Path(__file__).parent / "dashboard.html"
+
+_tracker: "StatusTracker | None" = None
+
+
+class StatusTracker:
+    """오케스트레이터 실행 상태 중앙 관리.
+
+    - status.json 파일에 상태 기록 (에이전트가 cat 으로 확인 가능)
+    - SSE(Server-Sent Events) 로 브라우저 대시보드에 실시간 푸시
+    """
+
+    def __init__(self, status_path: Path):
+        self.status_path = status_path
+        self._sse_queues: list[asyncio.Queue] = []
+        self._started = datetime.now()
+        self.state: dict = {
+            "phase": "idle",
+            "started_at": self._started.isoformat(),
+            "elapsed_sec": 0,
+            "current_step": "",
+            "mode": "create",
+            "total_groups": 0,
+            "completed_groups": 0,
+            "failed_groups": 0,
+            "groups": {},
+            "qa": {
+                "active": False,
+                "round": 0,
+                "max_rounds": QA_MAX_ROUNDS,
+                "layer": None,
+                "errors_found": 0,
+                "errors_fixed": 0,
+                "escalation_level": None,
+            },
+            "cost": {"total_usd": 0.0},
+            "logs": [],
+        }
+        self._write_file()
+
+    def update(self, **kwargs) -> None:
+        """상태 업데이트 → status.json 기록 + SSE 브로드캐스트."""
+        for k, v in kwargs.items():
+            if isinstance(v, dict) and isinstance(self.state.get(k), dict):
+                self.state[k].update(v)
+            else:
+                self.state[k] = v
+        self._refresh_elapsed()
+        self._refresh_group_counts()
+        self._write_file()
+        self._broadcast_sse()
+
+    def set_group_status(self, group_id: str, status: str, **extra) -> None:
+        """개별 그룹 상태 업데이트."""
+        if group_id not in self.state["groups"]:
+            self.state["groups"][group_id] = {}
+        self.state["groups"][group_id].update({"status": status, **extra})
+        self._refresh_elapsed()
+        self._refresh_group_counts()
+        self._write_file()
+        self._broadcast_sse()
+
+    def init_groups(self, groups: list[dict]) -> None:
+        """분류 완료 후 전체 그룹 초기화."""
+        self.state["total_groups"] = len(groups)
+        for g in groups:
+            profile = MODEL_PROFILES.get(g.get("profile", "standard"), {})
+            self.state["groups"][g["id"]] = {
+                "status": "pending",
+                "model": profile.get("model", ""),
+                "description": g.get("description", ""),
+            }
+        self._write_file()
+        self._broadcast_sse()
+
+    def add_log(self, msg: str) -> None:
+        """로그 메시지 추가 (최근 80개 유지)."""
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.state["logs"].append(f"[{ts}] {msg}")
+        self.state["logs"] = self.state["logs"][-80:]
+        self._write_file()
+        self._broadcast_sse()
+
+    def update_cost(self) -> None:
+        """_usage_by_model 에서 현재 비용 동기화."""
+        cost_data = compute_total_cost()
+        self.state["cost"]["total_usd"] = cost_data.get("total_cost_usd", 0.0)
+        # 파일/SSE 는 다음 update() 에서 처리하므로 여기선 스킵
+
+    def subscribe(self) -> asyncio.Queue:
+        """SSE 구독자 등록."""
+        q: asyncio.Queue = asyncio.Queue(maxsize=100)
+        try:
+            q.put_nowait(json.dumps(self.state, ensure_ascii=False, default=str))
+        except asyncio.QueueFull:
+            pass
+        self._sse_queues.append(q)
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        """SSE 구독자 해제."""
+        if q in self._sse_queues:
+            self._sse_queues.remove(q)
+
+    # ── internal ──
+
+    def _refresh_elapsed(self) -> None:
+        self.state["elapsed_sec"] = (datetime.now() - self._started).total_seconds()
+
+    def _refresh_group_counts(self) -> None:
+        groups = self.state.get("groups", {})
+        self.state["completed_groups"] = sum(
+            1 for g in groups.values() if g.get("status") in ("success",))
+        self.state["failed_groups"] = sum(
+            1 for g in groups.values() if g.get("status") in ("error",))
+
+    def _write_file(self) -> None:
+        try:
+            self.status_path.write_text(
+                json.dumps(self.state, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _broadcast_sse(self) -> None:
+        data = json.dumps(self.state, ensure_ascii=False, default=str)
+        for q in self._sse_queues:
+            try:
+                q.put_nowait(data)
+            except asyncio.QueueFull:
+                pass
+
+
+class _DashboardServer:
+    """aiohttp 기반 대시보드 웹 서버.
+
+    - GET /            → dashboard.html 서빙
+    - GET /status      → 현재 status.json 반환 (에이전트 폴링용)
+    - GET /events      → SSE 실시간 스트림 (브라우저용)
+    """
+
+    def __init__(self, tracker: StatusTracker, port: int, html_path: Path):
+        self.tracker = tracker
+        self.port = port
+        self.html_path = html_path
+        self._runner = None
+        self._site = None
+
+    async def _handle_index(self, request):
+        try:
+            html = self.html_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            html = "<h1>dashboard.html not found</h1>"
+        return aiohttp_web.Response(text=html, content_type="text/html")
+
+    async def _handle_status(self, request):
+        return aiohttp_web.json_response(self.tracker.state)
+
+    async def _handle_events(self, request):
+        response = aiohttp_web.StreamResponse(
+            status=200,
+            reason="OK",
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+        await response.prepare(request)
+
+        queue = self.tracker.subscribe()
+        try:
+            while True:
+                data = await queue.get()
+                await response.write(f"data: {data}\n\n".encode("utf-8"))
+        except (asyncio.CancelledError, ConnectionResetError, ConnectionError):
+            pass
+        finally:
+            self.tracker.unsubscribe(queue)
+        return response
+
+    async def start(self) -> None:
+        if not HAS_AIOHTTP:
+            return
+        app = aiohttp_web.Application()
+        app.router.add_get("/", self._handle_index)
+        app.router.add_get("/status", self._handle_status)
+        app.router.add_get("/events", self._handle_events)
+
+        self._runner = aiohttp_web.AppRunner(app)
+        await self._runner.setup()
+        self._site = aiohttp_web.TCPSite(self._runner, "0.0.0.0", self.port)
+        await self._site.start()
+
+    async def stop(self) -> None:
+        if self._runner:
+            await self._runner.cleanup()
+
+
+def _track(method: str, *args, **kwargs) -> None:
+    """Safe tracker call — no-op if tracker not initialized."""
+    if _tracker is not None:
+        fn = getattr(_tracker, method, None)
+        if fn:
+            fn(*args, **kwargs)
+
+
+async def _run_with_dashboard(async_fn, *args, dashboard_port: int = DASHBOARD_PORT, **kwargs):
+    """대시보드 서버를 시작하고 async_fn 을 실행한 뒤 정리.
+
+    HAS_AIOHTTP 가 False 이거나 dashboard_port 가 0 이면 대시보드 없이 실행.
+    """
+    global _tracker
+    _tracker = StatusTracker(STATUS_PATH)
+
+    server = None
+    if HAS_AIOHTTP and dashboard_port:
+        try:
+            server = _DashboardServer(_tracker, dashboard_port, DASHBOARD_HTML_PATH)
+            await server.start()
+            url = f"http://localhost:{dashboard_port}"
+            print(f"\n   🌐 대시보드: {url}\n")
+            _tracker.add_log(f"대시보드 시작: {url}")
+        except Exception as e:
+            print(f"   ⚠ 대시보드 시작 실패 (무시): {e}")
+            server = None
+    elif not HAS_AIOHTTP and dashboard_port:
+        print("   ⚠ aiohttp 미설치 — 대시보드 비활성화 (status.json 파일 기록은 유지)")
+
+    try:
+        return await async_fn(*args, **kwargs)
+    finally:
+        if _tracker:
+            _tracker.update(phase="done", current_step="작업 완료")
+            _tracker.add_log("오케스트레이터 종료")
+        if server:
+            await asyncio.sleep(3)  # 브라우저에서 최종 상태를 볼 수 있도록 잠시 대기
+            await server.stop()
 
 
 def compute_total_cost() -> dict:
@@ -395,6 +670,8 @@ MODEL_PROFILES = {
 # ── 과제 분류 ────────────────────────────────────────────────────────────────
 
 async def classify_tasks(client: anthropic.AsyncAnthropic, handoff_content: str) -> list[dict]:
+    _track("update", phase="classify", current_step="[ 1/4 ] 과제 분류 및 모델 선택 중...")
+    _track("add_log", "과제 분류 시작")
     print("[ 1/4 ] 과제 분류 및 모델 선택 중...")
 
     response = await _create_with_retry(client, dict(
@@ -449,6 +726,8 @@ JSON만 출력하세요. 마크다운 펜스 금지. 형식:
         data = json.loads(raw)
         groups = data.get("groups", [])
         print(f"         → {len(groups)}개 그룹 분류 완료\n")
+        _track("add_log", f"분류 완료: {len(groups)}개 그룹")
+        _track("init_groups", groups)
         for g in groups:
             profile = MODEL_PROFILES[g["profile"]]
             print(f"         • {g['id']} [{g['profile'].upper()}] {profile['model']}")
@@ -524,6 +803,7 @@ def _accumulate_usage(model: str, usage) -> None:
     bucket["output_tokens"] += getattr(usage, "output_tokens", 0) or 0
     bucket["cache_read_input_tokens"] += getattr(usage, "cache_read_input_tokens", 0) or 0
     bucket["cache_creation_input_tokens"] += getattr(usage, "cache_creation_input_tokens", 0) or 0
+    _track("update_cost")
 
 
 async def _create_with_retry(
@@ -566,6 +846,8 @@ async def _create_with_retry(
             else:
                 wait = (2 ** attempt) + random.uniform(0, 1.5)
             print(f"   [ 재시도 ] {group_id}: {status} → {wait:.0f}s 대기 (시도 {attempt+1}/{max_retries})")
+            _track("set_group_status", group_id, "rate_limited", wait=int(wait))
+            _track("add_log", f"재시도 {group_id}: {status} → {int(wait)}s 대기")
             await asyncio.sleep(wait)
         except anthropic.APIConnectionError as e:
             if attempt == max_retries - 1:
@@ -615,6 +897,8 @@ async def run_worker(
     started  = datetime.now()
 
     def _err(msg: str) -> dict:
+        _track("set_group_status", group_id, "error", message=msg[:120], duration=str(datetime.now() - started))
+        _track("add_log", f"에러 {group_id}: {msg[:80]}")
         return {
             "group_id": group_id, "status": "error",
             "profile": group["profile"],
@@ -625,6 +909,8 @@ async def run_worker(
             "duration": str(datetime.now() - started),
         }
 
+    _track("set_group_status", group_id, "running", model=profile["model"], description=group["description"], started_at=started.isoformat())
+    _track("add_log", f"시작 {group_id} ({profile['model']}): {group['description']}")
     print(f"   [ 시작 ] {group_id} ({profile['model']}): {group['description']}")
 
     try:
@@ -708,6 +994,8 @@ async def run_worker(
             return _err(f"git commit 실패: {commit_result.stderr.strip()}")
 
         duration = str(datetime.now() - started)
+        _track("set_group_status", group_id, "success", duration=duration, summary=result.get('summary', '')[:80])
+        _track("add_log", f"완료 {group_id}: {result.get('summary', '')[:60]} ({duration})")
         print(f"   [ 완료 ] {group_id}: {result.get('summary', '')[:80]} ({duration})")
 
         return {
@@ -901,7 +1189,6 @@ def save_worker_map(groups: list[dict], results: list[dict]):
             existing[file_rel] = {
                 "group_id": g["id"],
                 "profile": profile_key,
-                "model": profile["model"],
             }
 
     WORKER_MAP_PATH.write_text(
@@ -936,7 +1223,6 @@ def update_worker_map_after_patch(groups: list[dict], results: list[dict]):
                 worker_map[file_rel] = {
                     "group_id": g["id"],
                     "profile": profile_key,
-                    "model": profile["model"],
                 }
                 changed = True
     if changed:
@@ -1049,6 +1335,8 @@ async def patch_worker(
     started  = datetime.now()
 
     def _err(msg: str) -> dict:
+        _track("set_group_status", group_id, "error", message=msg[:120], duration=str(datetime.now() - started))
+        _track("add_log", f"에러 {group_id}: {msg[:80]}")
         return {
             "group_id": group_id, "status": "error",
             "profile": group["profile"],
@@ -1060,6 +1348,8 @@ async def patch_worker(
             "instruction": group.get("instruction", ""),
         }
 
+    _track("set_group_status", group_id, "running", model=profile["model"], description=group.get("description", ""), started_at=started.isoformat())
+    _track("add_log", f"시작 {group_id} ({profile['model']}): {group.get('description', '')}")
     print(f"   [ 시작 ] {group_id} ({profile['model']}): {group.get('description', '')}")
 
     try:
@@ -1133,6 +1423,8 @@ async def patch_worker(
             return _err(f"git commit 실패: {commit_result.stderr.strip()}")
 
         duration = str(datetime.now() - started)
+        _track("set_group_status", group_id, "success", duration=duration, summary=result.get('summary', '')[:80])
+        _track("add_log", f"완료 {group_id}: {result.get('summary', '')[:60]} ({duration})")
         print(f"   [ 완료 ] {group_id}: {result.get('summary', '')[:80]} ({duration})")
 
         return {
@@ -1191,6 +1483,706 @@ def append_patch_history(patch_text: str, results: list[dict], project_root: Pat
 
     handoff_path.write_text(new_content, encoding="utf-8")
     print(f"   → HANDOFF.md 수정 이력 추가됨")
+
+# ── QA 파이프라인 ────────────────────────────────────────────────────────────
+
+# ── QA Layer 1: 정적 분석 ────────────────────────────────────────────────────
+
+def _run_flutter_analyze(project_root: Path) -> list[dict]:
+    """flutter analyze 실행 → 에러 목록."""
+    print("      L1: flutter analyze 실행 중...")
+    try:
+        result = subprocess.run(
+            ["flutter.bat" if os.name == "nt" else "flutter", "analyze", "--no-pub"],
+            cwd=project_root, capture_output=True, text=True,
+            encoding="utf-8", timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        return [{"type": "analyze", "severity": "error",
+                 "message": "flutter analyze 타임아웃 (120초)"}]
+
+    if result.returncode == 0:
+        print("      L1: flutter analyze ✓ 에러 없음")
+        return []
+
+    errors = []
+    for line in (result.stdout + result.stderr).splitlines():
+        line = line.strip()
+        match = re.match(
+            r'(error|warning)\s*[•·]\s*(.+?)\s*[•·]\s*(\S+:\d+:\d+)\s*[•·]\s*(\S+)',
+            line, re.IGNORECASE,
+        )
+        if match:
+            severity, message, location, code = match.groups()
+            errors.append({
+                "type": "analyze", "severity": severity.lower(),
+                "message": message.strip(), "location": location.strip(),
+                "code": code.strip(), "raw": line,
+            })
+
+    if not errors and result.returncode != 0:
+        for line in (result.stdout + result.stderr).splitlines():
+            if "error" in line.lower() and ("lib/" in line or "Error:" in line):
+                errors.append({"type": "analyze", "severity": "error",
+                               "message": line.strip(), "location": "", "raw": line.strip()})
+
+    print(f"      L1: flutter analyze → {len(errors)}개 에러")
+    return errors
+
+
+def _run_flutter_build_web(project_root: Path) -> tuple[bool, list[dict]]:
+    """flutter build web 실행 → (성공여부, 에러 목록)."""
+    print("      L1: flutter build web 실행 중...")
+    try:
+        result = subprocess.run(
+            ["flutter.bat" if os.name == "nt" else "flutter", "build", "web", "--no-tree-shake-icons"],
+            cwd=project_root, capture_output=True, text=True,
+            encoding="utf-8", timeout=QA_FLUTTER_BUILD_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return False, [{"type": "build", "severity": "error",
+                        "message": f"flutter build web 타임아웃 ({QA_FLUTTER_BUILD_TIMEOUT}초)"}]
+
+    if result.returncode == 0:
+        print("      L1: flutter build web ✓ 빌드 성공")
+        return True, []
+
+    errors = []
+    output = result.stdout + result.stderr
+    error_blocks = re.split(r'(?=\S+\.dart:\d+:\d+: Error:)', output)
+    for block in error_blocks:
+        block = block.strip()
+        if "Error:" in block and len(block) > 10:
+            errors.append({"type": "build", "severity": "error",
+                           "message": block[:500], "raw": block})
+
+    if not errors:
+        errors.append({"type": "build", "severity": "error",
+                       "message": output[-1000:] if len(output) > 1000 else output,
+                       "raw": output})
+
+    print(f"      L1: flutter build web → {len(errors)}개 에러")
+    return False, errors
+
+
+# ── QA Layer 2: 런타임 검증 ──────────────────────────────────────────────────
+
+def _extract_routes(project_root: Path) -> list[str]:
+    """Flutter 코드에서 라우트 경로 추출."""
+    routes = ["/"]
+    lib_dir = project_root / "lib"
+    if not lib_dir.exists():
+        return routes
+
+    patterns = [
+        re.compile(r"""GoRoute\s*\(\s*path\s*:\s*['"]([^'"]+)['"]"""),
+        re.compile(r"""['"](/[a-zA-Z0-9_/\-]+)['"]\s*:\s*\("""),
+        re.compile(r"""path\s*:\s*['"](/[a-zA-Z0-9_/\-:]+)['"]"""),
+    ]
+
+    for dart_file in lib_dir.rglob("*.dart"):
+        try:
+            content = dart_file.read_text(encoding="utf-8")
+            for pattern in patterns:
+                for m in pattern.findall(content):
+                    if m.startswith("/") and m not in routes and len(m) < 100:
+                        routes.append(m)
+        except Exception:
+            continue
+
+    return routes
+
+
+async def _start_flutter_web_server(project_root: Path, port: int) -> asyncio.subprocess.Process:
+    """flutter run -d web-server 시작, 서빙 준비까지 대기."""
+    proc = await asyncio.create_subprocess_exec(
+        "flutter", "run", "-d", "web-server",
+        "--web-port", str(port), "--web-renderer", "html",
+        cwd=project_root,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    start = datetime.now()
+    while (datetime.now() - start).total_seconds() < QA_FLUTTER_SERVE_TIMEOUT:
+        try:
+            line_bytes = await asyncio.wait_for(proc.stdout.readline(), timeout=5.0)
+        except asyncio.TimeoutError:
+            if proc.returncode is not None:
+                raise RuntimeError(f"Flutter 서버 종료됨 (exit {proc.returncode})")
+            continue
+        if not line_bytes:
+            if proc.returncode is not None:
+                raise RuntimeError(f"Flutter 서버 종료됨 (exit {proc.returncode})")
+            continue
+        line = line_bytes.decode("utf-8", errors="replace").rstrip()
+        if line:
+            print(f"      flutter: {line[:120]}")
+        if "is being served at" in line.lower() or f"localhost:{port}" in line:
+            print(f"      L2: Flutter 웹 서버 준비 완료 (port {port})")
+            return proc
+
+    proc.terminate()
+    raise RuntimeError(f"Flutter 서버 시작 타임아웃 ({QA_FLUTTER_SERVE_TIMEOUT}초)")
+
+
+async def _stop_flutter_web_server(proc: asyncio.subprocess.Process):
+    """Flutter 웹 서버 정리 종료."""
+    try:
+        proc.terminate()
+        await asyncio.wait_for(proc.wait(), timeout=10)
+    except (asyncio.TimeoutError, ProcessLookupError):
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+
+
+async def _playwright_runtime_check(port: int, routes: list[str]) -> list[dict]:
+    """Playwright로 각 라우트 방문, 콘솔 에러 + 빈 화면 감지."""
+    if not HAS_PLAYWRIGHT:
+        print("      ⚠ Playwright 미설치 — L2 건너뜀 (uv add playwright && playwright install chromium)")
+        return []
+
+    errors: list[dict] = []
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+
+        for route in routes:
+            if ":" in route and route != "/":
+                continue  # 동적 라우트 건너뜀
+
+            page = await browser.new_page()
+            console_errors: list[str] = []
+            page.on("console", lambda msg: console_errors.append(f"[{msg.type}] {msg.text}")
+                     if msg.type == "error" else None)
+            page.on("pageerror", lambda err: console_errors.append(f"[pageerror] {err}"))
+
+            url = (f"http://localhost:{port}/#/{route.lstrip('/')}"
+                   if route != "/" else f"http://localhost:{port}/")
+            try:
+                await page.goto(url, timeout=QA_ROUTE_TIMEOUT, wait_until="load")
+                await page.wait_for_timeout(3000)
+
+                has_flutter = await page.evaluate(
+                    "!!document.querySelector('flt-glass-pane') || "
+                    "!!document.querySelector('flutter-view') || "
+                    "!!document.querySelector('canvas')"
+                )
+                if not has_flutter:
+                    errors.append({
+                        "type": "runtime", "severity": "error",
+                        "message": f"Flutter 엔진 미로딩: {route}", "route": route,
+                    })
+
+                for ce in console_errors:
+                    errors.append({
+                        "type": "runtime", "severity": "error",
+                        "message": f"콘솔 에러 ({route}): {ce[:300]}",
+                        "route": route, "raw": ce,
+                    })
+            except Exception as e:
+                errors.append({
+                    "type": "runtime", "severity": "error",
+                    "message": f"라우트 접근 실패 ({route}): {type(e).__name__}: {str(e)[:200]}",
+                    "route": route,
+                })
+            finally:
+                await page.close()
+
+        await browser.close()
+
+    print(f"      L2: 런타임 검증 → {len(errors)}개 에러 ({len(routes)}개 라우트)")
+    return errors
+
+
+# ── QA Layer 3: 시각 QA ──────────────────────────────────────────────────────
+
+async def _playwright_capture_screenshots(port: int, routes: list[str]) -> tuple[dict[str, bytes], list[dict]]:
+    """각 라우트 스크린샷 캡처 + 버튼 클릭 테스트."""
+    if not HAS_PLAYWRIGHT:
+        print("      ⚠ Playwright 미설치 — L3 건너뜀")
+        return {}, []
+
+    screenshots: dict[str, bytes] = {}
+    interaction_errors: list[dict] = []
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+
+        for route in routes:
+            if ":" in route and route != "/":
+                continue
+
+            page = await browser.new_page(viewport={"width": 1280, "height": 800})
+            url = (f"http://localhost:{port}/#/{route.lstrip('/')}"
+                   if route != "/" else f"http://localhost:{port}/")
+
+            try:
+                await page.goto(url, timeout=QA_ROUTE_TIMEOUT, wait_until="load")
+                await page.wait_for_timeout(3000)
+
+                screenshots[route] = await page.screenshot(full_page=False)
+
+                # 시맨틱 버튼 탐색 + 클릭 테스트
+                buttons = await page.get_by_role("button").all()
+                for i, btn in enumerate(buttons[:10]):
+                    try:
+                        if await btn.is_visible():
+                            label = await btn.get_attribute("aria-label") or f"button_{i}"
+                            before_url = page.url
+                            page_errs: list[str] = []
+                            page.on("pageerror", lambda e: page_errs.append(str(e)))
+
+                            await btn.click(timeout=3000)
+                            await page.wait_for_timeout(1000)
+
+                            if page_errs:
+                                interaction_errors.append({
+                                    "type": "interaction", "severity": "error",
+                                    "message": f"버튼 '{label}' 클릭 에러 ({route}): {page_errs[0][:200]}",
+                                    "route": route,
+                                })
+
+                            if page.url != before_url:
+                                await page.goto(url, timeout=QA_ROUTE_TIMEOUT, wait_until="load")
+                                await page.wait_for_timeout(2000)
+                    except Exception:
+                        pass
+            except Exception as e:
+                interaction_errors.append({
+                    "type": "interaction", "severity": "warning",
+                    "message": f"L3 라우트 접근 실패 ({route}): {type(e).__name__}",
+                    "route": route,
+                })
+            finally:
+                await page.close()
+
+        await browser.close()
+
+    return screenshots, interaction_errors
+
+
+async def _vision_qa_analyze(
+    client: anthropic.AsyncAnthropic,
+    screenshots: dict[str, bytes],
+) -> list[dict]:
+    """스크린샷을 Claude Vision에 분석 요청."""
+    if not screenshots:
+        return []
+
+    import base64
+    print(f"      L3: {len(screenshots)}개 화면 Vision 분석 중...")
+
+    content_blocks: list[dict] = []
+    for route, img_bytes in screenshots.items():
+        content_blocks.append({"type": "text", "text": f"라우트: {route}"})
+        content_blocks.append({
+            "type": "image",
+            "source": {
+                "type": "base64", "media_type": "image/png",
+                "data": base64.b64encode(img_bytes).decode(),
+            },
+        })
+
+    response = await _create_with_retry(client, dict(
+        model="claude-sonnet-4-6",
+        max_tokens=4000,
+        system=(
+            "Flutter 웹 앱의 스크린샷을 보고 명백한 UI 문제만 진단하세요.\n"
+            "확인: 빈 화면, 빨간 에러 배너, 레이아웃 완전 붕괴, 렌더링 실패.\n"
+            "무시: 디자인 미적 판단, 플레이스홀더, 미세 정렬.\n"
+            "JSON 배열 응답. 문제 없으면 []:\n"
+            '[{"route":"/path","severity":"error","description":"설명","likely_file":"lib/path.dart"}]'
+        ),
+        messages=[{"role": "user", "content": content_blocks}],
+    ), "vision_qa")
+
+    raw = strip_code_fences(next((b.text for b in response.content if b.type == "text"), "[]"))
+    try:
+        issues = json.loads(raw)
+        return [
+            {
+                "type": "visual", "severity": i.get("severity", "warning"),
+                "message": f"{i.get('route', '?')}: {i.get('description', '')}",
+                "route": i.get("route", ""),
+                "location": i.get("likely_file", ""),
+                "raw": json.dumps(i, ensure_ascii=False),
+            }
+            for i in issues
+        ]
+    except json.JSONDecodeError:
+        return []
+
+
+# ── 에스컬레이션 ─────────────────────────────────────────────────────────────
+
+async def _classify_error_start_level(
+    client: anthropic.AsyncAnthropic,
+    errors: list[dict],
+) -> int:
+    """에러 난이도 → 시작 에스컬레이션 레벨 (0~3)."""
+    error_summary = "\n".join(
+        f"- [{e.get('type','?')}/{e.get('severity','?')}] {e['message'][:200]}"
+        for e in errors[:20]
+    )
+    response = await _create_with_retry(client, dict(
+        model=ORCHESTRATOR_MODEL,
+        max_tokens=200,
+        system=(
+            "에러 메시지를 분석해서 수정 난이도를 판단하세요.\n"
+            "0 = 단순 (오타, import 누락, 타입 불일치) → Haiku\n"
+            "1 = 보통 (상태 관리, 라우트 매핑, null 안전성) → Sonnet\n"
+            "2 = 복잡 (Provider 순환, 비동기 초기화, 아키텍처) → Opus\n"
+            "3 = 매우 복잡 (근본 설계 결함) → Opus+Thinking\n"
+            "숫자만 답하세요."
+        ),
+        messages=[{"role": "user", "content": f"에러:\n{error_summary}"}],
+    ), "error_classify")
+
+    raw = next((b.text for b in response.content if b.type == "text"), "0").strip()
+    try:
+        return min(max(int(raw[0]), 0), 3)
+    except (ValueError, IndexError):
+        return 0
+
+
+def _extract_affected_files(errors: list[dict]) -> list[str]:
+    """에러 목록에서 관련 파일 경로 추출."""
+    files = set()
+    for e in errors:
+        for field in ["location", "message", "raw"]:
+            val = e.get(field, "")
+            if not val:
+                continue
+            matches = re.findall(r'((?:lib|test|functions)/\S+\.(?:dart|ts|tsx|js))', val)
+            files.update(matches)
+            # location "lib/x.dart:10:5" → "lib/x.dart"
+            loc_match = re.match(r'(\S+\.dart):\d+:\d+', val)
+            if loc_match:
+                files.add(loc_match.group(1))
+    return sorted(f.split(":")[0] for f in files)
+
+
+async def _escalation_fix_attempt(
+    client: anthropic.AsyncAnthropic,
+    level: dict,
+    error_text: str,
+    affected_files: list[str],
+    project_root: Path,
+) -> dict:
+    """단일 에스컬레이션 수정 시도."""
+    file_contents = {}
+    for file_rel in affected_files:
+        file_path = project_root / file_rel
+        if file_path.exists():
+            try:
+                file_contents[file_rel] = file_path.read_text(encoding="utf-8")
+            except Exception:
+                pass
+
+    if not file_contents:
+        return {"status": "error", "message": "수정 대상 파일 없음"}
+
+    files_block = "\n\n".join(
+        f"### {p}\n```{_detect_lang(p)}\n{c}\n```"
+        for p, c in file_contents.items()
+    )
+
+    params = dict(
+        model=level["model"],
+        max_tokens=32000,
+        system=(
+            "당신은 Flutter/Dart 및 TypeScript 전문 개발자입니다.\n"
+            "아래 에러를 수정하세요. 에러를 발생시키는 코드의 수정된 전체 파일을 반환하세요.\n"
+            "\n"
+            "중요 제약:\n"
+            "- 에러 수정에 필요한 최소한의 변경만\n"
+            "- 요청 없는 리팩토링/주석 추가/구조 변경 금지\n"
+            "- 변경 필요한 파일만 응답에 포함\n"
+            "- 수정된 전체 파일 내용 반환 (diff 아님)\n"
+            "\n"
+            + _worker_format_guide(modify_mode=True)
+        ),
+        messages=[{
+            "role": "user",
+            "content": (
+                f"아래 에러를 수정하세요:\n\n{error_text}\n\n"
+                f"현재 파일 내용:\n{files_block}"
+            ),
+        }],
+    )
+
+    if level.get("thinking"):
+        params["thinking"] = {"type": "enabled", "budget_tokens": 10000}
+
+    try:
+        response = await _create_with_retry(client, params, f"fix_{level['id']}")
+    except Exception as e:
+        return {"status": "error", "message": f"API 호출 실패: {e}"}
+
+    raw = strip_code_fences(next((b.text for b in response.content if b.type == "text"), ""))
+    if not raw:
+        return {"status": "error", "message": "빈 응답"}
+    if hasattr(response, "stop_reason") and response.stop_reason == "max_tokens":
+        return {"status": "error", "message": "응답 잘림 (max_tokens)"}
+
+    try:
+        result = parse_worker_response(raw)
+    except Exception as e:
+        return {"status": "error", "message": f"파싱 실패: {e}"}
+
+    files_out = result.get("files", {})
+    if not files_out:
+        return {"status": "error", "message": "수정된 파일 없음"}
+
+    for file_rel, content in files_out.items():
+        if file_rel.endswith("/") or file_rel.endswith("\\"):
+            continue
+        file_path = project_root / file_rel
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(content, encoding="utf-8")
+
+    subprocess.run(["git", "add", "-A"], cwd=project_root, capture_output=True)
+    commit_msg = f"qa-fix({level['label'].lower()}): {result.get('summary', '')[:80]}"
+    subprocess.run(
+        ["git", "commit", "-m", commit_msg],
+        cwd=project_root, capture_output=True, text=True, encoding="utf-8",
+    )
+
+    return {
+        "status": "success", "level": level["label"],
+        "files_modified": list(files_out.keys()),
+        "summary": result.get("summary", ""),
+    }
+
+
+async def _escalation_loop(
+    client: anthropic.AsyncAnthropic,
+    errors: list[dict],
+    project_root: Path,
+    verify_fn,
+) -> dict:
+    """에스컬레이션 루프: Haiku→Sonnet→Opus→Opus+Thinking."""
+    start_level = await _classify_error_start_level(client, errors)
+    print(f"      에스컬레이션 시작: Lv{start_level + 1} ({ESCALATION_LEVELS[start_level]['label']})")
+
+    error_text = "\n".join(
+        f"- [{e.get('type','?')}/{e.get('severity','?')}] {e['message']}"
+        for e in errors
+    )
+    affected_files = _extract_affected_files(errors)
+
+    if not affected_files:
+        return {"status": "unresolvable",
+                "message": "에러에서 수정 대상 파일을 특정할 수 없음",
+                "errors": errors}
+
+    for level_idx in range(start_level, len(ESCALATION_LEVELS)):
+        level = ESCALATION_LEVELS[level_idx]
+        print(f"\n      [ Lv{level_idx + 1} ] {level['label']}로 수정 시도...")
+
+        fix_result = await _escalation_fix_attempt(
+            client, level, error_text, affected_files, project_root
+        )
+
+        if fix_result.get("status") != "success":
+            print(f"      [ Lv{level_idx + 1} ] 실패: {fix_result.get('message', '')[:120]}")
+            continue
+
+        remaining = await verify_fn()
+        if not remaining:
+            print(f"      [ Lv{level_idx + 1} ] ✓ {level['label']}로 해결")
+            return {"status": "resolved", "level": level["label"], "fix": fix_result}
+
+        print(f"      [ Lv{level_idx + 1} ] 수정 후에도 {len(remaining)}개 에러 잔존")
+        errors = remaining
+        error_text = "\n".join(
+            f"- [{e.get('type','?')}/{e.get('severity','?')}] {e['message']}" for e in errors
+        )
+        affected_files = _extract_affected_files(errors)
+
+    return {"status": "unresolved",
+            "message": f"Lv{len(ESCALATION_LEVELS)}까지 시도했으나 해결 불가",
+            "remaining_errors": errors}
+
+
+# ── QA 메인 ──────────────────────────────────────────────────────────────────
+
+async def qa_phase(
+    project_root: Path,
+    client: anthropic.AsyncAnthropic,
+    layers: tuple = (1, 2, 3),
+    max_rounds: int = QA_MAX_ROUNDS,
+    no_escalation: bool = False,
+) -> dict:
+    """QA 3층 파이프라인 + 에스컬레이션."""
+    _track("update", phase="qa_l1", current_step="QA 파이프라인 시작", qa={"active": True, "round": 0, "max_rounds": max_rounds, "layer": None, "errors_found": 0, "errors_fixed": 0, "escalation_level": None})
+    _track("add_log", f"QA 파이프라인 시작 (레이어: {layers})")
+    print(f"\n{'─' * 55}")
+    print(f"  QA 파이프라인 시작 (레이어: {layers}, 최대 라운드: {max_rounds})")
+    print(f"{'─' * 55}\n")
+
+    qa_report: dict = {"rounds": 0, "layers_passed": [], "auto_fixed": [], "unresolved": []}
+
+    for round_num in range(1, max_rounds + 1):
+        qa_report["rounds"] = round_num
+        all_passed = True
+        _track("update", qa={"round": round_num})
+        print(f"\n   ═══ QA 라운드 {round_num}/{max_rounds} ═══\n")
+
+        # ── Layer 1: 정적 분석 ──
+        if 1 in layers:
+            analyze_errors = _run_flutter_analyze(project_root)
+            if analyze_errors:
+                all_passed = False
+                if no_escalation:
+                    qa_report["unresolved"].extend(analyze_errors)
+                else:
+                    async def _verify_analyze():
+                        return _run_flutter_analyze(project_root)
+                    result = await _escalation_loop(
+                        client, analyze_errors, project_root, verify_fn=_verify_analyze,
+                    )
+                    if result["status"] == "resolved":
+                        qa_report["auto_fixed"].append({"layer": "L1-analyze", **result})
+                    else:
+                        qa_report["unresolved"].extend(
+                            result.get("remaining_errors", result.get("errors", [])))
+                        print("      ⚠ L1 analyze 해결 불가 — QA 중단")
+                        break
+                    continue  # 수정 후 라운드 재시작
+
+            build_ok, build_errors = _run_flutter_build_web(project_root)
+            if not build_ok:
+                all_passed = False
+                if no_escalation:
+                    qa_report["unresolved"].extend(build_errors)
+                else:
+                    async def _verify_build():
+                        ok, errs = _run_flutter_build_web(project_root)
+                        return errs if not ok else []
+                    result = await _escalation_loop(
+                        client, build_errors, project_root, verify_fn=_verify_build,
+                    )
+                    if result["status"] == "resolved":
+                        qa_report["auto_fixed"].append({"layer": "L1-build", **result})
+                    else:
+                        qa_report["unresolved"].extend(
+                            result.get("remaining_errors", result.get("errors", [])))
+                        print("      ⚠ L1 build 해결 불가 — QA 중단")
+                        break
+                    continue
+
+            if "L1" not in qa_report["layers_passed"]:
+                qa_report["layers_passed"].append("L1")
+
+        # ── Layer 2: 런타임 검증 ──
+        if 2 in layers and HAS_PLAYWRIGHT:
+            print(f"\n      L2: 런타임 검증 시작...")
+            routes = _extract_routes(project_root)
+            print(f"      L2: 감지된 라우트 {len(routes)}개: {routes[:10]}")
+
+            flutter_proc = None
+            try:
+                flutter_proc = await _start_flutter_web_server(project_root, QA_WEB_PORT)
+                runtime_errors = await _playwright_runtime_check(QA_WEB_PORT, routes)
+            except Exception as e:
+                runtime_errors = [{"type": "runtime", "severity": "error",
+                                   "message": f"L2 실행 실패: {type(e).__name__}: {e}"}]
+            finally:
+                if flutter_proc:
+                    await _stop_flutter_web_server(flutter_proc)
+
+            if runtime_errors:
+                all_passed = False
+                if no_escalation:
+                    qa_report["unresolved"].extend(runtime_errors)
+                else:
+                    async def _verify_runtime():
+                        fp = None
+                        try:
+                            fp = await _start_flutter_web_server(project_root, QA_WEB_PORT)
+                            return await _playwright_runtime_check(QA_WEB_PORT, routes)
+                        except Exception as e:
+                            return [{"type": "runtime", "severity": "error", "message": str(e)}]
+                        finally:
+                            if fp:
+                                await _stop_flutter_web_server(fp)
+                    result = await _escalation_loop(
+                        client, runtime_errors, project_root, verify_fn=_verify_runtime,
+                    )
+                    if result["status"] == "resolved":
+                        qa_report["auto_fixed"].append({"layer": "L2", **result})
+                    else:
+                        qa_report["unresolved"].extend(
+                            result.get("remaining_errors", result.get("errors", [])))
+                    continue
+            else:
+                if "L2" not in qa_report["layers_passed"]:
+                    qa_report["layers_passed"].append("L2")
+
+        # ── Layer 3: 시각 QA ──
+        if 3 in layers and HAS_PLAYWRIGHT:
+            print(f"\n      L3: 시각 QA 시작...")
+            routes = _extract_routes(project_root)
+
+            flutter_proc = None
+            try:
+                flutter_proc = await _start_flutter_web_server(project_root, QA_WEB_PORT)
+                screenshots, interaction_errors = await _playwright_capture_screenshots(
+                    QA_WEB_PORT, routes)
+                visual_issues = await _vision_qa_analyze(client, screenshots)
+                all_l3_errors = interaction_errors + visual_issues
+            except Exception as e:
+                all_l3_errors = [{"type": "visual", "severity": "error",
+                                  "message": f"L3 실행 실패: {type(e).__name__}: {e}"}]
+            finally:
+                if flutter_proc:
+                    await _stop_flutter_web_server(flutter_proc)
+
+            if all_l3_errors:
+                all_passed = False
+                # L3 시각 이슈는 자동 수정 위험도 높으므로 보고만
+                qa_report["unresolved"].extend(all_l3_errors)
+                print(f"      L3: {len(all_l3_errors)}개 시각 이슈 → 사용자 확인 필요")
+            else:
+                if "L3" not in qa_report["layers_passed"]:
+                    qa_report["layers_passed"].append("L3")
+
+        if all_passed:
+            break
+
+    _print_qa_report(qa_report)
+    return qa_report
+
+
+def _print_qa_report(report: dict):
+    """QA 결과 보고서 출력."""
+    print(f"\n{'─' * 55}")
+    print(f"  QA 결과 보고")
+    print(f"{'─' * 55}")
+    print(f"\n  라운드: {report['rounds']}회")
+    print(f"  통과 레이어: {', '.join(report['layers_passed']) or '없음'}")
+
+    if report["auto_fixed"]:
+        print(f"\n  [ 자동 수정 ]")
+        for fix in report["auto_fixed"]:
+            print(f"    ✓ {fix.get('layer', '?')} — {fix.get('level', '?')}로 해결")
+            if fix.get("fix", {}).get("summary"):
+                print(f"      {fix['fix']['summary'][:100]}")
+
+    if report["unresolved"]:
+        print(f"\n  [ 미해결 — 사용자 확인 필요 ]")
+        for err in report["unresolved"][:20]:
+            print(f"    ✗ [{err.get('type', '?')}] {err['message'][:150]}")
+        if len(report["unresolved"]) > 20:
+            print(f"    ... 외 {len(report['unresolved']) - 20}개")
+
+    if not report["unresolved"]:
+        print(f"\n  ✅ QA 전체 통과 — 1차 데모 준비 완료")
+
+    print(f"\n{'─' * 55}\n")
+
 
 # ── worker_map 빌드 모드 (브라운필드 프로젝트용) ────────────────────────────
 
@@ -1357,7 +2349,6 @@ async def build_worker_map_main():
             worker_map[file_rel] = {
                 "group_id": group_id,
                 "profile": profile_key,
-                "model": profile["model"],
             }
             classified_files.add(file_rel)
 
@@ -1405,7 +2396,9 @@ async def build_worker_map_main():
 
 # ── 수정 모드: 메인 ──────────────────────────────────────────────────────────
 
-async def patch_main(patch_text: str, concurrency: int, auto_merge: bool = False):
+async def patch_main(patch_text: str, concurrency: int, auto_merge: bool = False,
+                     do_qa: bool = False, qa_layers: tuple = (1, 2, 3),
+                     no_escalation: bool = False):
     if not ANTHROPIC_API_KEY:
         print("⚠  ANTHROPIC_API_KEY 가 설정되지 않았습니다.")
         sys.exit(1)
@@ -1427,6 +2420,8 @@ async def patch_main(patch_text: str, concurrency: int, auto_merge: bool = False
 
     print(f"\n오케스트레이터(수정 모드) 시작 — {datetime.now().strftime('%H:%M:%S')}\n")
     print(f"수정 요청: {patch_text}\n")
+    _track("update", mode="patch", current_step="오케스트레이터(수정 모드) 시작")
+    _track("add_log", f"오케스트레이터(수정) 시작: {patch_text[:60]}")
 
     project_root = get_project_root()
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
@@ -1436,6 +2431,7 @@ async def patch_main(patch_text: str, concurrency: int, auto_merge: bool = False
         print("수정할 그룹이 없습니다.")
         return
 
+    _track("update", phase="worktree", current_step="[ 2/4 ] Worktree 생성 중...")
     print(f"[ 2/4 ] Worktree 생성 중...")
     worktrees: dict[str, tuple[Path, str]] = {}
     for group in groups:
@@ -1443,6 +2439,8 @@ async def patch_main(patch_text: str, concurrency: int, auto_merge: bool = False
         worktrees[group["id"]] = (wt_path, branch)
         print(f"         → {group['id']}: {wt_path.name}  [{branch}]")
 
+    _track("update", phase="build", current_step=f"[ 3/4 ] 수정 워커 병렬 실행 중 (동시 {concurrency}개)...")
+    _track("add_log", f"수정 워커 병렬 실행 시작 (동시 {concurrency}개)")
     print(f"\n[ 3/4 ] 수정 워커 병렬 실행 중 (동시 {concurrency}개)...\n")
     semaphore = asyncio.Semaphore(concurrency)
 
@@ -1492,17 +2490,26 @@ async def patch_main(patch_text: str, concurrency: int, auto_merge: bool = False
             else:
                 results.append(r)
 
+    _track("update", phase="report", current_step="[ 4/4 ] 보고서 생성 중...")
     print(f"\n[ 4/4 ] 보고서 생성 중...")
     print_report(list(results), groups, mode="patch")
     update_worker_map_after_patch(groups, results)
     append_patch_history(patch_text, results, project_root)
 
     if auto_merge:
+        _track("update", phase="merge", current_step="자동 머지 + 정리 중...")
+        _track("add_log", "자동 머지 시작")
         auto_merge_and_cleanup(results, worktrees, project_root)
+
+    if do_qa:
+        await qa_phase(project_root, client, layers=qa_layers, no_escalation=no_escalation)
 
 # ── 메인 ─────────────────────────────────────────────────────────────────────
 
-async def main(handoff_path: Path, dry_run: bool, concurrency: int = 8, only_groups: list[str] | None = None, auto_merge: bool = False):
+async def main(handoff_path: Path, dry_run: bool, concurrency: int = 8,
+               only_groups: list[str] | None = None, auto_merge: bool = False,
+               do_qa: bool = False, qa_layers: tuple = (1, 2, 3),
+               no_escalation: bool = False):
     if not ANTHROPIC_API_KEY:
         print("⚠  ANTHROPIC_API_KEY 가 설정되지 않았습니다.")
         print("   Windows: $env:ANTHROPIC_API_KEY='sk-ant-...'")
@@ -1513,6 +2520,8 @@ async def main(handoff_path: Path, dry_run: bool, concurrency: int = 8, only_gro
         sys.exit(1)
 
     print(f"\n오케스트레이터 시작  —  {datetime.now().strftime('%H:%M:%S')}\n")
+    _track("update", mode="create", current_step="오케스트레이터 시작")
+    _track("add_log", "오케스트레이터(신규 생성) 시작")
 
     handoff_content = handoff_path.read_text(encoding="utf-8")
     project_root    = get_project_root()
@@ -1535,6 +2544,7 @@ async def main(handoff_path: Path, dry_run: bool, concurrency: int = 8, only_gro
         print("[ dry-run ] 실제 실행을 건너뜁니다.")
         return
 
+    _track("update", phase="worktree", current_step="[ 2/4 ] Worktree 생성 중...")
     print(f"[ 2/4 ] Worktree 생성 중...")
     worktrees: dict[str, tuple[Path, str]] = {}
     for group in groups:
@@ -1542,6 +2552,8 @@ async def main(handoff_path: Path, dry_run: bool, concurrency: int = 8, only_gro
         worktrees[group["id"]] = (wt_path, branch)
         print(f"         → {group['id']}: {wt_path.name}  [{branch}]")
 
+    _track("update", phase="build", current_step=f"[ 3/4 ] 서브에이전트 병렬 실행 중 (동시 {concurrency}개)...")
+    _track("add_log", f"서브에이전트 병렬 실행 시작 (동시 {concurrency}개)")
     print(f"\n[ 3/4 ] 서브에이전트 병렬 실행 중 (동시 {concurrency}개)...\n")
     semaphore = asyncio.Semaphore(concurrency)
 
@@ -1595,12 +2607,18 @@ async def main(handoff_path: Path, dry_run: bool, concurrency: int = 8, only_gro
             else:
                 results.append(r)
 
+    _track("update", phase="report", current_step="[ 4/4 ] 보고서 생성 중...")
     print(f"\n[ 4/4 ] 보고서 생성 중...")
     print_report(list(results), groups, mode="create")
     save_worker_map(groups, results)
 
     if auto_merge:
+        _track("update", phase="merge", current_step="\uc790\ub3d9 \uba38\uc9c0 + \uc815\ub9ac \uc911...")
+        _track("add_log", "\uc790\ub3d9 \uba38\uc9c0 \uc2dc\uc791")
         auto_merge_and_cleanup(results, worktrees, project_root)
+
+    if do_qa:
+        await qa_phase(project_root, client, layers=qa_layers, no_escalation=no_escalation)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -1619,6 +2637,16 @@ if __name__ == "__main__":
                         help="성공한 그룹을 현재 HEAD 에 자동 머지하고 worktree/브랜치 정리")
     parser.add_argument("--build-worker-map", action="store_true",
                         help="브라운필드 프로젝트용: 기존 파일을 스캔해서 worker_map.json 을 1회성 생성 (파일 수정 안 함)")
+    parser.add_argument("--qa", action="store_true",
+                        help="빌드/수정 후 QA 파이프라인 실행 (정적 분석 + 런타임 + 시각)")
+    parser.add_argument("--qa-only", action="store_true",
+                        help="QA만 단독 실행 (빌드/수정 없이)")
+    parser.add_argument("--qa-layers", type=str, default="1,2,3",
+                        help="QA 레이어 선택 (예: 1,2 = 정적+런타임만)")
+    parser.add_argument("--no-escalation", action="store_true",
+                        help="에스컬레이션 비활성화 (에러 수집만, 자동 수정 안 함)")
+    parser.add_argument("--no-dashboard", action="store_true",
+                        help="대시보드 비활성화 (status.json 파일 기록도 끄기)")
     args = parser.parse_args()
 
     if args.report:
@@ -1642,15 +2670,38 @@ if __name__ == "__main__":
         sys.exit(1)
     lock_path.write_text(str(os.getpid()))
 
+    qa_layers = tuple(int(x.strip()) for x in args.qa_layers.split(","))
+    dashboard_port = 0 if args.no_dashboard else DASHBOARD_PORT
+
     tee = _setup_log()
     try:
-        if args.build_worker_map:
+        if args.qa_only:
+            if not ANTHROPIC_API_KEY:
+                print("⚠  ANTHROPIC_API_KEY 가 설정되지 않았습니다.")
+                sys.exit(1)
+            asyncio.run(_run_with_dashboard(
+                qa_phase,
+                get_project_root(),
+                anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY),
+                layers=qa_layers,
+                no_escalation=args.no_escalation,
+                dashboard_port=dashboard_port,
+            ))
+        elif args.build_worker_map:
             asyncio.run(build_worker_map_main())
         elif args.patch:
-            asyncio.run(patch_main(args.patch, args.concurrency, args.auto_merge))
+            asyncio.run(_run_with_dashboard(
+                patch_main, args.patch, args.concurrency, args.auto_merge,
+                args.qa, qa_layers, args.no_escalation,
+                dashboard_port=dashboard_port,
+            ))
         else:
             only_groups = [g.strip() for g in args.only_groups.split(",")] if args.only_groups else None
-            asyncio.run(main(args.handoff, args.dry_run, args.concurrency, only_groups, args.auto_merge))
+            asyncio.run(_run_with_dashboard(
+                main, args.handoff, args.dry_run, args.concurrency, only_groups,
+                args.auto_merge, args.qa, qa_layers, args.no_escalation,
+                dashboard_port=dashboard_port,
+            ))
     finally:
         sys.stdout = tee._stdout
         tee.close()

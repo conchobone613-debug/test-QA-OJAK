@@ -1,0 +1,437 @@
+{
+  "pubspec.yaml": {
+    "group_id": "group_1",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "analysis_options.yaml": {
+    "group_id": "group_1",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "lib/main.dart": {
+    "group_id": "group_1",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "lib/app.dart": {
+    "group_id": "group_1",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "lib/core/theme/app_colors.dart": {
+    "group_id": "group_1",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "lib/core/theme/app_text_styles.dart": {
+    "group_id": "group_1",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "lib/core/theme/app_theme.dart": {
+    "group_id": "group_1",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "lib/core/theme/app_gradients.dart": {
+    "group_id": "group_1",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "functions/package.json": {
+    "group_id": "group_2",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "functions/tsconfig.json": {
+    "group_id": "group_2",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "functions/src/saju/sajuUtils.ts": {
+    "group_id": "group_2",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "functions/src/saju/calculateSaju.ts": {
+    "group_id": "group_2",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "functions/src/saju/calculateCompatibility.ts": {
+    "group_id": "group_2",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "functions/src/matching/matchingUtils.ts": {
+    "group_id": "group_2",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "functions/src/matching/generateRecommendations.ts": {
+    "group_id": "group_2",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "functions/src/matching/processSwipe.ts": {
+    "group_id": "group_2",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "functions/src/ai/generateInterpretation.ts": {
+    "group_id": "group_2",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "functions/src/ai/generateFortune.ts": {
+    "group_id": "group_2",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "functions/src/ai/generateIcebreaker.ts": {
+    "group_id": "group_2",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "functions/src/notification/sendNotification.ts": {
+    "group_id": "group_2",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "functions/src/index.ts": {
+    "group_id": "group_2",
+    "profile": "heavy",
+    "model": "claude-opus-4-6"
+  },
+  "lib/core/constants/saju_constants.dart": {
+    "group_id": "group_3",
+    "profile": "light",
+    "model": "claude-haiku-4-5-20251001"
+  },
+  "lib/core/constants/app_constants.dart": {
+    "group_id": "group_3",
+    "profile": "light",
+    "model": "claude-haiku-4-5-20251001"
+  },
+  "lib/l10n/app_ko.arb": {
+    "group_id": "group_4",
+    "profile": "light",
+    "model": "claude-haiku-4-5-20251001"
+  },
+  "lib/l10n/app_en.arb": {
+    "group_id": "group_4",
+    "profile": "light",
+    "model": "claude-haiku-4-5-20251001"
+  },
+  "l10n.yaml": {
+    "group_id": "group_4",
+    "profile": "light",
+    "model": "claude-haiku-4-5-20251001"
+  },
+  "lib/core/router/app_router.dart": {
+    "group_id": "group_5",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/profile/models/user_profile.dart": {
+    "group_id": "group_6",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/profile/models/saju_profile.dart": {
+    "group_id": "group_6",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/matching/models/match.dart": {
+    "group_id": "group_6",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/matching/models/compatibility_result.dart": {
+    "group_id": "group_6",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/chat/models/message.dart": {
+    "group_id": "group_6",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/shared/models/five_elements.dart": {
+    "group_id": "group_6",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/shared/services/firebase_service.dart": {
+    "group_id": "group_7",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/shared/services/notification_service.dart": {
+    "group_id": "group_7",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/core/utils/validators.dart": {
+    "group_id": "group_7",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/core/utils/date_utils.dart": {
+    "group_id": "group_7",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/profile/screens/settings_screen.dart": {
+    "group_id": "group_7",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/profile/screens/blocked_users_screen.dart": {
+    "group_id": "group_7",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/profile/screens/notification_settings_screen.dart": {
+    "group_id": "group_7",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/shared/widgets/ojak_button.dart": {
+    "group_id": "group_8",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/shared/widgets/ojak_card.dart": {
+    "group_id": "group_8",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/shared/widgets/glassmorphism_container.dart": {
+    "group_id": "group_8",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/shared/widgets/ohaeng_icon.dart": {
+    "group_id": "group_8",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/shared/widgets/compatibility_grade_badge.dart": {
+    "group_id": "group_8",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/shared/widgets/star_particle_background.dart": {
+    "group_id": "group_8",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/shared/widgets/shimmer_loading.dart": {
+    "group_id": "group_8",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/auth/screens/splash_screen.dart": {
+    "group_id": "group_9",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/auth/screens/onboarding_screen.dart": {
+    "group_id": "group_9",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/auth/screens/login_screen.dart": {
+    "group_id": "group_9",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/auth/providers/auth_provider.dart": {
+    "group_id": "group_9",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/auth/services/auth_service.dart": {
+    "group_id": "group_9",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/profile/screens/profile_setup_screen.dart": {
+    "group_id": "group_10",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/profile/screens/saju_loading_screen.dart": {
+    "group_id": "group_10",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/profile/screens/saju_result_screen.dart": {
+    "group_id": "group_10",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/profile/providers/profile_provider.dart": {
+    "group_id": "group_10",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/profile/widgets/five_elements_chart.dart": {
+    "group_id": "group_10",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/profile/widgets/saju_card.dart": {
+    "group_id": "group_10",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/matching/providers/matching_provider.dart": {
+    "group_id": "group_11",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/matching/widgets/compatibility_badge.dart": {
+    "group_id": "group_11",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/matching/widgets/swipe_card.dart": {
+    "group_id": "group_11",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/matching/widgets/match_animation.dart": {
+    "group_id": "group_11",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/matching/screens/match_feed_screen.dart": {
+    "group_id": "group_11",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/matching/screens/user_detail_screen.dart": {
+    "group_id": "group_11",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/matching/screens/match_success_screen.dart": {
+    "group_id": "group_11",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/matching/screens/compatibility_detail_screen.dart": {
+    "group_id": "group_11",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/chat/providers/chat_provider.dart": {
+    "group_id": "group_12",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/chat/widgets/chat_bubble.dart": {
+    "group_id": "group_12",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/chat/widgets/icebreaker_card.dart": {
+    "group_id": "group_12",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/chat/screens/chat_list_screen.dart": {
+    "group_id": "group_12",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/chat/screens/chat_room_screen.dart": {
+    "group_id": "group_12",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/fortune/providers/fortune_provider.dart": {
+    "group_id": "group_13",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/fortune/widgets/fortune_card.dart": {
+    "group_id": "group_13",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/fortune/screens/fortune_screen.dart": {
+    "group_id": "group_13",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/fortune/screens/my_saju_screen.dart": {
+    "group_id": "group_13",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/fortune/screens/compatibility_check_screen.dart": {
+    "group_id": "group_13",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/fortune/screens/fortune_report_screen.dart": {
+    "group_id": "group_13",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/profile/screens/my_page_screen.dart": {
+    "group_id": "group_14",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/profile/screens/edit_profile_screen.dart": {
+    "group_id": "group_14",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/subscription/screens/subscription_screen.dart": {
+    "group_id": "group_14",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/subscription/providers/subscription_provider.dart": {
+    "group_id": "group_14",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/subscription/services/payment_service.dart": {
+    "group_id": "group_14",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/community/providers/community_provider.dart": {
+    "group_id": "group_15",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/community/screens/community_screen.dart": {
+    "group_id": "group_15",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/community/screens/post_detail_screen.dart": {
+    "group_id": "group_15",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/community/screens/create_post_screen.dart": {
+    "group_id": "group_15",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  },
+  "lib/features/community/screens/ohang_group_screen.dart": {
+    "group_id": "group_15",
+    "profile": "standard",
+    "model": "claude-sonnet-4-6"
+  }
+}

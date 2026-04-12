@@ -155,7 +155,7 @@ HANDOFF.md 보고 실행해줘
 
 Claude 가 확인 없이 바로 실행합니다:
 
-1. `cd orchestrator && uv run run.py` (분류 + 실행 + 보고 한 번에)
+1. `cd orchestrator && uv run run.py --auto-merge --qa` (분류 + 병렬 작업 + 자동 머지 + QA 한 번에)
 2. 완료되면 채팅창에 보고서 출력
 
 > dry-run을 먼저 보고 싶을 때: `uv run run.py --dry-run` 직접 실행
@@ -222,46 +222,22 @@ c:/dev/
 
   ✗ group_11: 응답이 max_tokens에 잘림 (len=15890)
 
-[ 다음 단계 ]
-
-  git merge auto/group_1-0410-153022
-  git merge auto/group_2-0410-153023
+[ 자동 머지 ]
+  ✓ group_1: 머지 완료
+  ✓ group_2: 머지 완료
   ...
-  확인 후 merge 해주세요.
+
+[ 다음 단계 ]
+  ✅ QA 파이프라인 자동 실행 시작...
 ```
 
 보고서는 `orchestrator/last_report.json` 에도 저장됩니다.
 
-### Step 7. 결과 검토 + 머지
+### Step 7. 결과 검토 (자동 머지 + QA)
 
-#### 7-1. 각 worktree 직접 확인
-
-```bash
-cd ../my-flutter-app-group_1-0410-1530
-ls lib/
-cat lib/main.dart
-```
-
-#### 7-2. 원본으로 돌아와서 머지
-
-```bash
-cd ../my-flutter-app
-git merge auto/group_1-0410-153022
-git merge auto/group_2-0410-153023
-... (성공한 그룹 모두)
-```
-
-⚠️ **머지 순서 주의**: 의존성 있는 그룹은 순서대로 머지하세요. 예를 들어 `group_3 (디자인 시스템)` 을 `group_6 (공통 위젯)` 보다 먼저 머지해야 위젯이 색상을 참조할 수 있습니다.
-
-#### 7-3. worktree 정리
-
-머지 끝나면 사용한 worktree 들 삭제:
-
-```bash
-git worktree list                              # 목록 확인
-git worktree remove ../my-flutter-app-group_1-0410-1530
-git worktree remove ../my-flutter-app-group_2-0410-1530
-... (또는 git worktree prune)
+별도의 머지 명령 없이 성공한 모든 워크트리가 `main` 브랜치에 **의존성 순서대로** 자동 머지됩니다.
+머지가 끝나면 곧바로 **QA 파이프라인**이 실행되어 빌드 오류나 런타임 오류를 3단계(`--qa-layers 1,2,3`)에 걸쳐 검증하고 자동 수정합니다.
+완료 후 병렬 작업에 사용된 워크트리 임시 폴더들 역시 스크립트가 알아서 깔끔히 제거합니다. (수동 정리 불필요)
 ```
 
 ### Step 8. 실패 그룹 재실행
@@ -322,13 +298,11 @@ uv run run.py --patch "수정 내용" --auto-merge
 {
   "lib/core/theme/app_colors.dart": {
     "group_id": "group_3",
-    "profile": "standard",
-    "model": "claude-sonnet-4-6"
+    "profile": "standard"
   },
   "functions/src/saju/calculateSaju.ts": {
     "group_id": "group_2",
-    "profile": "heavy",
-    "model": "claude-opus-4-6"
+    "profile": "heavy"
   }
 }
 ```
@@ -368,8 +342,7 @@ uv run run.py --build-worker-map
 ```json
 "lib/core/utils/validators.dart": {
   "group_id": "group_15",
-  "profile": "standard",
-  "model": "claude-sonnet-4-6"
+  "profile": "standard"
 }
 ```
 
@@ -454,6 +427,116 @@ git merge patch/group_3-0410-153022
 **기술적으로 race condition 을 막는 방법은?**
 
 이론적으로 `run.lock` 을 강화해서 `advisory lock` 을 걸거나 `flock`/`msvcrt.locking` 을 쓸 수 있지만, 현재 구현에는 없습니다. 현실적으로 **"한 프로젝트 = 한 세션" 원칙을 지키는 쪽이 훨씬 단순**하고, 그게 오케스트레이터의 설계 전제입니다 (단일 프로세스 기준).
+
+---
+
+## 🔍 QA 파이프라인 (`--qa`, `--qa-only`)
+
+빌드 또는 수정 후 자동으로 3층 QA 검증을 실행하고, 에러를 감지하면 자동 에스컬레이션으로 수정을 시도합니다.
+
+### 사용법
+
+```bash
+# 신규 생성 후 QA 자동 실행
+uv run run.py --auto-merge --qa
+
+# 수정 후 QA 자동 실행
+uv run run.py --patch "수정 내용" --auto-merge --qa
+
+# QA만 단독 실행 (빌드/수정 없이)
+uv run run.py --qa-only
+
+# 특정 레이어만 실행 (예: 정적 분석 + 런타임만)
+uv run run.py --qa-only --qa-layers 1,2
+
+# 에러 수집만 하고 자동 수정 안 함
+uv run run.py --qa-only --no-escalation
+```
+
+### 3층 QA 레이어
+
+| 레이어 | 검증 내용 | 도구 | 자동 수정 |
+|---|---|---|---|
+| **L1: 정적 분석** | `flutter analyze` 에러 + `flutter build web` 컴파일 | Flutter CLI | ✓ 에스컬레이션 |
+| **L2: 런타임 검증** | 콘솔 에러, 빈 화면, Flutter 엔진 미로딩 | Playwright | ✓ 에스컬레이션 |
+| **L3: 시각 QA** | UI 붕괴, 빨간 에러 배너, 렌더링 실패 | Playwright + Claude Vision | ✗ 보고만 |
+
+### 에스컬레이션 로직
+
+QA에서 에러가 감지되면 Opus가 에러 난이도를 분석하고 적절한 레벨부터 수정을 시작합니다:
+
+```
+에러 감지 → Opus가 난이도 판단 → 시작 레벨 결정
+                                    ↓
+    Lv1: Haiku → 수정 → 재검증 → 해결? → 완료
+                                    ↓ 실패
+    Lv2: Sonnet → 수정 → 재검증 → 해결? → 완료
+                                    ↓ 실패
+    Lv3: Opus → 수정 → 재검증 → 해결? → 완료
+                                    ↓ 실패
+    Lv4: Opus+Thinking → 수정 → 재검증 → 해결? → 완료
+                                    ↓ 실패
+    사용자에게 미해결 에러 상세 보고
+```
+
+- **단순 에러** (오타, import 누락): Lv1 Haiku에서 바로 해결
+- **보통 에러** (상태 관리, null 안전성): Lv2 Sonnet부터 시작
+- **복잡 에러** (Provider 순환, 아키텍처): Lv3 Opus부터 시작
+- **근본 결함**: Lv4 Opus+Thinking부터 시작
+
+### Playwright 사전 준비
+
+L2/L3 레이어를 사용하려면 Playwright가 필요합니다:
+
+```bash
+cd orchestrator
+uv add playwright
+playwright install chromium
+```
+
+Playwright가 미설치면 L2/L3은 자동으로 건너뛰고 L1만 실행됩니다.
+
+### Flutter Semantics 자동 삽입
+
+Playwright가 Flutter 웹 앱의 UI 요소에 접근하려면 Semantics 트리가 활성화되어야 합니다.
+코드 생성 시 워커가 `Semantics` 위젯으로 버튼/텍스트를 감싸도록 프롬프트에 명시되어 있습니다.
+
+### QA 결과 보고서
+
+```
+───────────────────────────────────────────────────────
+  QA 결과 보고
+───────────────────────────────────────────────────────
+
+  라운드: 2회
+  통과 레이어: L1, L2
+
+  [ 자동 수정 ]
+    ✓ L1-analyze — Haiku로 해결
+      import 누락 3건 자동 추가
+
+  [ 미해결 — 사용자 확인 필요 ]
+    ✗ [visual] /home: 하단 네비게이션 아이콘 잘림
+
+  ✅ QA 전체 통과 — 1차 데모 준비 완료   (에러 없는 경우)
+───────────────────────────────────────────────────────
+```
+
+### CLI 인자 요약
+
+| 인자 | 설명 |
+|---|---|
+| `--qa` | 빌드/수정 후 QA 파이프라인 자동 실행 |
+| `--qa-only` | QA만 단독 실행 (빌드/수정 없이) |
+| `--qa-layers 1,2,3` | 실행할 QA 레이어 선택 (기본: 1,2,3) |
+| `--no-escalation` | 에러 수집만 하고 자동 수정 안 함 |
+
+### 주의사항
+
+- L1 정적 분석이 실패하면 L2/L3은 실행되지 않습니다 (빌드 자체가 안 되므로)
+- L3 시각 QA는 자동 수정하지 않고 보고만 합니다 (UI 변경의 위험도가 높으므로)
+- 에스컬레이션 수정은 `qa-fix(haiku):`, `qa-fix(sonnet):` 등의 커밋 메시지로 git에 기록됩니다
+- 최대 3라운드까지 시도합니다 (라운드마다 L1→L2→L3 순차)
 
 ---
 

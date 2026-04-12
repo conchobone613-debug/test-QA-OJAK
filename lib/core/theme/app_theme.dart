@@ -164,13 +164,13 @@ abstract final class AppTheme {
       ),
       switchTheme: SwitchThemeData(
         thumbColor: WidgetStateProperty.resolveWith((states) {
-          if (states.contains(WidgetState.selected)) {
+          if (states.contains(WidgetStates.selected)) {
             return AppColors.secondary;
           }
           return AppColors.textTertiary;
         }),
         trackColor: WidgetStateProperty.resolveWith((states) {
-          if (states.contains(WidgetState.selected)) {
+          if (states.contains(WidgetStates.selected)) {
             return AppColors.secondary.withOpacity(0.3);
           }
           return AppColors.surface;

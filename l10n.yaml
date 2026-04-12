@@ -7,7 +7,6 @@ preferred-supported-locales:
   - ko
   - en
 nullable-getter: false
-synthetic-package: true
 use-escaping: true
 lint-warnings: true
 input-files:

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../providers/matching_provider.dart';
 import '../widgets/compatibility_badge.dart';
+import 'dart:math' as math;
 
 class CompatibilityDetailScreen extends StatefulWidget {
   final FeedUser user;
@@ -375,7 +376,5 @@ class _RadarChartPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_RadarChartPainter old) =>
-      old.animationValue != animationValue;
+    old.animationValue != animationValue;
 }
-
-import 'dart:math' as math;

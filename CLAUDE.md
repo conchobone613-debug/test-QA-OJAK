@@ -11,9 +11,10 @@
 
 1. HANDOFF.md 확인
 2. 확인 없이 바로 실행
-   cd orchestrator && uv run run.py
+   cd orchestrator && uv run run.py --auto-merge --qa
 3. 실행이 끝나면 last_report.json을 읽어 보고서를 채팅창에 출력
    - **중간에 사용자에게 확인받거나 진행 상황을 채팅창에 출력하지 않는다**
+   - **브랜치는 스크립트가 자동 머지하므로, 사용자에게 절대 머지 승인을 요구하지 않는다**
 
 ### HANDOFF.md 읽기
 - 사용자가 "이어서", "계속", "이전 작업" 등을 언급할 때
@@ -48,8 +49,10 @@
 | 요청 유형 | 처리 방식 |
 |---|---|
 | 코드 파일 수정 (lib/, functions/, test/, web/, android/, ios/, pubspec.yaml 등) | `cd orchestrator && uv run run.py --patch "수정 내용" --auto-merge` |
+| 코드 수정 + QA 검증 | `cd orchestrator && uv run run.py --patch "수정 내용" --auto-merge --qa` |
+| QA만 단독 실행 | `cd orchestrator && uv run run.py --qa-only` |
 | 메타 문서 수정 (CLAUDE.md, HANDOFF.md, WORKFLOW_GUIDE.md, CHANGELOG.md, README.md) | 직접 Edit/Write OK |
-| 신규 프로젝트 생성 (HANDOFF.md 기반) | `cd orchestrator && uv run run.py --auto-merge` |
+| 신규 프로젝트 생성 (HANDOFF.md 기반) | `cd orchestrator && uv run run.py --auto-merge --qa` |
 | 읽기 / 탐색 / 질문 / 디버깅 분석 | 직접 처리 OK |
 
 ### 이유

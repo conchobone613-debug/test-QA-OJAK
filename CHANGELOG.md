@@ -4,6 +4,57 @@
 
 ## [Unreleased]
 
+### Changed — 오케스트레이터 기본 실행 워크플로우 변경 (`--auto-merge --qa` 강제) (2026-04-12)
+
+오케스트레이터 실행 시 수동 머지 및 QA 미실행을 기본으로 하던 것에서, `--auto-merge`와 `--qa` 플래그를 기본 옵션으로 강제하여 `CLAUDE.md` 및 `WORKFLOW_GUIDE.md` 에 전면 적용했습니다.
+
+**변경 사항**:
+- `CLAUDE.md`: 기본 실행 명령어(`uv run run.py`)를 `uv run run.py --auto-merge --qa` 로 교체 및 사용자에게 머지 승인을 묻는 행위 엄격히 금지.
+- `WORKFLOW_GUIDE.md`: 수동 검토 및 병합 안내(Step 7)를 삭제하고 "작업 완료 시 자동 머지 이후 즉시 3단계 QA 파이프라인 우회 없이 자동 실행" 내용으로 문서 최신화.
+
+**효과**:
+코드 작업 중간에 사용자의 승인(승인 대기 병목)을 완전히 제거. 사용자는 Claude에 지시만 내리면 워커 병렬 수정, 의존성에 따른 순차 자동 병합, Playwright/Vision 3단계 QA, 에러 시 내부 에스컬레이션(자가 수정)까지 원스톱으로 완료된 코드를 전달받게 됨.
+
+---
+
+## [0.2.0] — 2026-04-12
+
+### Added — QA 3층 파이프라인 + 에스컬레이션 자동 수정 (2026-04-12)
+
+코드 생성/수정 후 자동으로 QA 검증을 실행하고, 에러 감지 시 모델을 상향하면서 자동 수정을 시도하는 파이프라인 추가. 사용자가 "작동 가능한 1차 데모"를 받기 위해 기본적인 빌드/런타임 에러를 수동으로 보고할 필요가 없어짐.
+
+**QA 3층 레이어**:
+- **L1 (정적 분석)**: `flutter analyze` + `flutter build web` → 컴파일/타입 에러 검출
+- **L2 (런타임 검증)**: Playwright로 Flutter 웹서버 기동 → 콘솔 에러, 빈 화면, Flutter 엔진 미로딩 감지
+- **L3 (시각 QA)**: 스크린샷 캡처 + Claude Vision API로 UI 붕괴/에러 배너/렌더링 실패 탐지
+
+**에스컬레이션 로직**:
+- Opus가 에러 메시지 분석 → 난이도 기반 시작 레벨 결정 (0=단순→Haiku, 3=근본결함→Opus+Thinking)
+- Lv1(Haiku) → Lv2(Sonnet) → Lv3(Opus) → Lv4(Opus+Thinking) 순으로 수정 시도
+- 각 레벨에서 수정 후 동일 QA 레이어로 재검증, 해결되면 즉시 종료
+- 최대 3라운드 반복, Lv4까지 실패 시 사용자에게 상세 에러 보고
+
+**구현** ([orchestrator/run.py](orchestrator/run.py)):
+- `ESCALATION_LEVELS` 상수 (4단계 모델/thinking 설정)
+- `_run_flutter_analyze()`, `_run_flutter_build_web()` — L1 정적 분석
+- `_extract_routes()`, `_start_flutter_web_server()`, `_stop_flutter_web_server()`, `_playwright_runtime_check()` — L2 런타임
+- `_playwright_capture_screenshots()`, `_vision_qa_analyze()` — L3 시각
+- `_classify_error_start_level()`, `_extract_affected_files()`, `_escalation_fix_attempt()`, `_escalation_loop()` — 에스컬레이션
+- `qa_phase()` — 메인 파이프라인 (레이어 순차 → 에스컬레이션 → 라운드 반복)
+- `_print_qa_report()` — 결과 보고서 출력
+
+**CLI 인자**: `--qa`, `--qa-only`, `--qa-layers`, `--no-escalation`
+
+**의존성**: `playwright>=1.40.0` (`pyproject.toml`에 추가)
+
+**Worker Map 변경**: `model` 필드를 worker_map.json 엔트리에서 제거. 실행 시점에 에스컬레이션 단계에 맞춰 동적으로 모델이 결정되므로 고정 모델 필드가 불필요해짐.
+
+**문서 반영**:
+- `CLAUDE.md`: 라우팅 표에 QA 관련 행 3개 추가
+- `WORKFLOW_GUIDE.md`: "QA 파이프라인" 섹션 신규 추가 (사용법, 레이어 설명, 에스컬레이션 흐름, CLI 인자, 주의사항)
+
+**왜 이게 필요한가**: 코드 생성 후 앱을 실제로 실행하면 버튼 미반응, 페이지 미전환, 에러 메시지 등이 다수 발생. 이를 사용자가 일일이 보고하던 방식에서, 오케스트레이터가 자율적으로 감지·수정하도록 전환. 사용자는 "작동하는 앱"을 받고 디테일한 개선만 지시하면 됨.
+
 ### Added — WORKFLOW_GUIDE 병렬 세션 금지 경고 (2026-04-10)
 
 `WORKFLOW_GUIDE.md` 의 수정 모드(`--patch`) 섹션에 "**동일 레포에 Claude Code 세션 2개 병렬 실행 금지**" 경고 추가. OJAK 에서 이 템플릿을 설계/구현하던 중 실제로 겪은 병렬 세션 race 케이스를 바탕으로 작성.
@@ -318,7 +369,7 @@ uv run run.py --concurrency 12   # 공격적
 
 ---
 
-## [0.1.0] — 2026-04-XX
+## [0.1.0] — 2026-04-10
 
 ### Added
 - Flutter 멀티에이전트 오케스트레이터 템플릿 초기 버전

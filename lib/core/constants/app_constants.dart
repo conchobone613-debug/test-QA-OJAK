@@ -58,4 +58,3 @@ class AppConstants {
   static const int sajuDataCacheDurationMinutes = 60; // 1시간
   static const int compatibilityResultCacheDurationMinutes = 30; // 30분
 }
->>>

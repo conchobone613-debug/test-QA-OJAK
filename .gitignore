@@ -125,6 +125,10 @@ __pycache__/
 .python-version
 .uv-cache/
 orchestrator/last_report.json
+orchestrator/status.json
+orchestrator/last_run.log
+orchestrator/run.lock
+orchestrator/usage_history.jsonl
 
 # uv lockfile must be committed for reproducible builds
 !orchestrator/uv.lock
