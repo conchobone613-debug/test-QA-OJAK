@@ -1015,7 +1015,7 @@ async def run_worker(
 
 # ── 보고서 ───────────────────────────────────────────────────────────────────
 
-def print_report(results: list[dict], groups: list[dict], mode: str = "create"):
+def print_report(results: list[dict], groups: list[dict], mode: str = "create", qa_report: dict | None = None, auto_merged: bool = False):
     print(f"\n{'═'*55}")
     print(f"  작업 완료 보고  —  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"{'═'*55}")
@@ -1069,7 +1069,9 @@ def print_report(results: list[dict], groups: list[dict], mode: str = "create"):
         print(f"[ 누적 비용 ] 총 {cumulative['total_runs']}회 실행, 누적 {cumulative['total_cost_usd']:.4f} USD\n")
 
     print(f"[ 다음 단계 ]\n")
-    if success:
+    if auto_merged:
+        print("  자동 머지 및 브랜치 정리가 완료되었습니다.")
+    elif success:
         for r in success:
             print(f"  git merge {r['branch']}")
         print(f"\n  확인 후 merge 해주세요.")
@@ -1079,6 +1081,7 @@ def print_report(results: list[dict], groups: list[dict], mode: str = "create"):
         "timestamp": datetime.now().isoformat(),
         "groups": groups,
         "results": results,
+        "qa_report": qa_report,
         "cost": cost_data,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -1493,7 +1496,7 @@ def _run_flutter_analyze(project_root: Path) -> list[dict]:
     print("      L1: flutter analyze 실행 중...")
     try:
         result = subprocess.run(
-            ["flutter.bat" if os.name == "nt" else "flutter", "analyze", "--no-pub"],
+            ["flutter", "analyze", "--no-pub"],
             cwd=project_root, capture_output=True, text=True,
             encoding="utf-8", timeout=120,
         )
@@ -1535,7 +1538,7 @@ def _run_flutter_build_web(project_root: Path) -> tuple[bool, list[dict]]:
     print("      L1: flutter build web 실행 중...")
     try:
         result = subprocess.run(
-            ["flutter.bat" if os.name == "nt" else "flutter", "build", "web", "--no-tree-shake-icons"],
+            ["flutter", "build", "web", "--web-renderer", "html", "--no-tree-shake-icons"],
             cwd=project_root, capture_output=True, text=True,
             encoding="utf-8", timeout=QA_FLUTTER_BUILD_TIMEOUT,
         )
@@ -2490,19 +2493,20 @@ async def patch_main(patch_text: str, concurrency: int, auto_merge: bool = False
             else:
                 results.append(r)
 
-    _track("update", phase="report", current_step="[ 4/4 ] 보고서 생성 중...")
-    print(f"\n[ 4/4 ] 보고서 생성 중...")
-    print_report(list(results), groups, mode="patch")
-    update_worker_map_after_patch(groups, results)
-    append_patch_history(patch_text, results, project_root)
-
+    qa_report = None
     if auto_merge:
         _track("update", phase="merge", current_step="자동 머지 + 정리 중...")
         _track("add_log", "자동 머지 시작")
         auto_merge_and_cleanup(results, worktrees, project_root)
 
     if do_qa:
-        await qa_phase(project_root, client, layers=qa_layers, no_escalation=no_escalation)
+        qa_report = await qa_phase(project_root, client, layers=qa_layers, no_escalation=no_escalation)
+
+    _track("update", phase="report", current_step="[ 4/4 ] 최종 보고서 생성 중...")
+    print(f"\n[ 4/4 ] 최종 보고서 생성 중...")
+    print_report(list(results), groups, mode="patch", qa_report=qa_report, auto_merged=auto_merge)
+    update_worker_map_after_patch(groups, results)
+    append_patch_history(patch_text, results, project_root)
 
 # ── 메인 ─────────────────────────────────────────────────────────────────────
 
@@ -2607,18 +2611,19 @@ async def main(handoff_path: Path, dry_run: bool, concurrency: int = 8,
             else:
                 results.append(r)
 
-    _track("update", phase="report", current_step="[ 4/4 ] 보고서 생성 중...")
-    print(f"\n[ 4/4 ] 보고서 생성 중...")
-    print_report(list(results), groups, mode="create")
-    save_worker_map(groups, results)
-
+    qa_report = None
     if auto_merge:
         _track("update", phase="merge", current_step="\uc790\ub3d9 \uba38\uc9c0 + \uc815\ub9ac \uc911...")
         _track("add_log", "\uc790\ub3d9 \uba38\uc9c0 \uc2dc\uc791")
         auto_merge_and_cleanup(results, worktrees, project_root)
 
     if do_qa:
-        await qa_phase(project_root, client, layers=qa_layers, no_escalation=no_escalation)
+        qa_report = await qa_phase(project_root, client, layers=qa_layers, no_escalation=no_escalation)
+
+    _track("update", phase="report", current_step="[ 4/4 ] 최종 보고서 생성 중...")
+    print(f"\n[ 4/4 ] 최종 보고서 생성 중...")
+    print_report(list(results), groups, mode="create", qa_report=qa_report, auto_merged=auto_merge)
+    save_worker_map(groups, results)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

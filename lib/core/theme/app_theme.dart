@@ -41,7 +41,7 @@ abstract final class AppTheme {
         type: BottomNavigationBarType.fixed,
         elevation: 0,
       ),
-      cardTheme: CardTheme(
+      cardTheme: CardThemeData(
         color: AppColors.surface,
         elevation: 0,
         shape: RoundedRectangleBorder(
@@ -135,7 +135,7 @@ abstract final class AppTheme {
         dragHandleColor: AppColors.textTertiary,
         dragHandleSize: Size(40, 4),
       ),
-      dialogTheme: DialogTheme(
+      dialogTheme: DialogThemeData(
         backgroundColor: AppColors.backgroundElevated,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(20),
@@ -176,7 +176,7 @@ abstract final class AppTheme {
           return AppColors.surface;
         }),
       ),
-      tabBarTheme: TabBarTheme(
+      tabBarTheme: TabBarThemeData(
         labelColor: AppColors.secondary,
         unselectedLabelColor: AppColors.textTertiary,
         labelStyle: AppTextStyles.titleS,
